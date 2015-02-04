@@ -1059,6 +1059,105 @@ class BinaryClassifier(ProxyClassifier):
         return predictions
 
 
+class MaxPositiveEstimateCombiner(PredictionsCombiner):
+    """Provides a decision by choosing the class which classifier has higher
+    estimate value
+    """
+
+    predictions = ConditionalAttribute(enabled=True,
+        doc="Mean predictions")
+
+    estimates = ConditionalAttribute(enabled=True,
+        doc="Predictions from all classifiers are stored")
+    
+    def __init__(self, classes, default_class, **kwargs):
+        PredictionsCombiner.__init__(self, **kwargs)
+        self._classes = classes
+        self._default_class = default_class
+
+    def __call__(self, clfs, dataset):
+        """Actual callable - perform meaning
+
+        """
+        if len(clfs)==0:
+            return []                   # to don't even bother
+
+        all_estimates = []
+        all_cls = [self._default_class]
+        for cls, clf in zip(self._classes,clfs):
+            # Lets check first if necessary conditional attribute is enabled
+            if not clf.ca.is_enabled("estimates"):
+                raise ValueError, "OneClassCombiner needs learners (such " \
+                      " as %s) with state 'estimates' enabled" % clf
+#            if not clf.ca.is_enabled("predictions"):
+#                raise ValueError, "OneClassCombiner needs learners (such " \
+#                      " as %s) with state 'predictions' enabled" % clf
+#            all_predictions.append(clf.ca.predictions)
+            all_cls.append(cls)
+            all_estimates.append(clf.ca.estimates)
+
+        # compute mean
+#        all_predictions = np.asarray(all_predictions)
+#        predictions = np.mean(all_predictions, axis=0)
+        
+        predictions = ([all_cls[np.argmax((0,)+ests)] for ests in zip(*all_estimates)])
+
+        ca = self.ca
+        ca.estimates = np.asarray(all_estimates).max(0)
+        ca.predictions = predictions
+        return predictions
+
+class OneclassClassifier(CombinedClassifier):
+    
+    def __init__(self, clfs, default_class, **kwargs):
+        """
+        Parameters
+        ----------
+        clf : Classifier
+          classifier to use
+        poslabels : list
+          list of labels which are treated as +1 category
+        neglabels : list
+          list of labels which are treated as -1 category
+        """
+        kwargs['clfs'] = [clf[1] for clf in clfs]
+        self.__classes = [clf[0] for clf in clfs]
+        if 'combiner' not in kwargs:
+            kwargs['combiner'] = MaxPositiveEstimateCombiner(self.__classes, default_class)
+
+        CombinedClassifier.__init__(self, **kwargs)
+        self._default_class = default_class
+        self.__clfs = clfs
+        
+    def _train(self, dataset):
+        """Train `OneClassClassifier`
+        """
+        for cls, clf in self.__clfs:
+            dsbin = dataset[dataset.targets==cls]
+            dsbin.targets = np.ones(dsbin.nsamples, dtype=np.int8)
+            clf.train(dsbin)
+
+    def _predict(self, dataset):
+        """Predict using `OneClassClassifier`
+        """
+        """
+        raw_predictions = dict([ clf.predict(dataset) for cls,clf in self.__clfs.items() ])
+        self.ca.raw_predictions = raw_predictions
+        assert(len(self.__clfs)>0)
+        if self.ca.is_enabled("estimates"):
+            if np.array([x.ca.is_enabled("estimates")
+                        for x in self.__clfs]).all():
+                estimates = [ clf.ca.estimates for csl,clf in self.__clfs.items() ]
+                self.ca.raw_estimates = estimates
+            else:
+                warning("One or more classifiers in %s has no 'estimates' state" %
+                        self + "enabled, thus BoostedClassifier can't have" +
+                        " 'raw_estimates' conditional attribute defined")
+            predictions = self.__combiner(self.__clfs, dataset)
+        """
+        predictions = CombinedClassifier._predict(self, dataset)
+        return predictions
+
 
 class MulticlassClassifier(CombinedClassifier):
     """Perform multiclass classification using a list of binary classifiers.
