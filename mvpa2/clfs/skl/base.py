@@ -133,7 +133,7 @@ class SKLLearnerAdapter(Classifier):
         if self.ca.is_enabled('estimates') and hasattr(self._skl_learner, 'decision_function'):
                 # Duplication of computation, since in many scenarios
                 # predict() calls predict_proba()
-                self.ca.probabilities = self._skl_learner.decision_function(data)
+                self.ca.estimates = self._skl_learner.decision_function(data)
         else:
             self.ca.estimates = res
         return res
