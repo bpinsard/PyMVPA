@@ -130,5 +130,10 @@ class SKLLearnerAdapter(Classifier):
             else:
                 warning("%s has no predict_proba() defined, so no probability"
                         " estimates could be extracted" % self._skl_learner)
-        self.ca.estimates = res
+        if self.ca.is_enabled('estimates') and hasattr(self._skl_learner, 'decision_function'):
+                # Duplication of computation, since in many scenarios
+                # predict() calls predict_proba()
+                self.ca.probabilities = self._skl_learner.decision_function(data)
+        else:
+            self.ca.estimates = res
         return res
