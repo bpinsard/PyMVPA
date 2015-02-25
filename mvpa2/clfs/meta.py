@@ -1090,18 +1090,18 @@ class MaxPositiveEstimateCombiner(PredictionsCombiner):
                 raise ValueError, "MaxPositiveEstimateCombiner needs learners (such " \
                       " as %s) with state 'estimates' enabled" % clf
             all_cls.append(cls)
-            all_estimates.append(np.squeeze(clf.ca.estimates))
+            all_estimates.append(clf.ca.estimates)
 
         all_cls.append(self._default_class)
         all_estimates.append(np.zeros(all_estimates[0].shape))
 
         ca = self.ca
-        ca.estimates = np.asarray(all_estimates)
-        ca.predictions = predictions = np.asarray(all_cls)[np.argmax(ca.estimates,0)]
+        ca.estimates = np.hstack(all_estimates)
+        ca.predictions = predictions = np.asarray(all_cls)[np.argmax(ca.estimates,1)]
 
         return predictions
 
-class OneclassClassifier(CombinedClassifier):
+class OneClassClassifier(CombinedClassifier):
     
     def __init__(self, clfs, default_class, **kwargs):
         """
