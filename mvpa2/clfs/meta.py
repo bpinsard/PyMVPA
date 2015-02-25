@@ -1077,25 +1077,28 @@ class MaxPositiveEstimateCombiner(PredictionsCombiner):
 
     def __call__(self, clfs, dataset):
         """Actual callable - perform meaning
+
         """
         if len(clfs)==0:
             return []                   # to don't even bother
 
         all_estimates = []
-        all_cls = [self._default_class]
+        all_cls = []
         for cls, clf in zip(self._classes,clfs):
             # Lets check first if necessary conditional attribute is enabled
             if not clf.ca.is_enabled("estimates"):
-                raise ValueError, "OneClassCombiner needs learners (such " \
+                raise ValueError, "MaxPositiveEstimateCombiner needs learners (such " \
                       " as %s) with state 'estimates' enabled" % clf
             all_cls.append(cls)
             all_estimates.append(np.squeeze(clf.ca.estimates))
-        
-        predictions = ([all_cls[np.argmax((0,)+ests)] for ests in zip(*all_estimates)])
+
+        all_cls.append(self._default_class)
+        all_estimates.append(np.zeros(all_estimates[0].shape))
 
         ca = self.ca
-        ca.estimates = np.asarray(all_estimates).max(0)
-        ca.predictions = predictions
+        ca.estimates = np.asarray(all_estimates)
+        ca.predictions = predictions = np.asarray(all_cls)[np.argmax(ca.estimates,0)]
+
         return predictions
 
 class OneclassClassifier(CombinedClassifier):
