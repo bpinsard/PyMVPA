@@ -1090,7 +1090,7 @@ class MaxPositiveEstimateCombiner(PredictionsCombiner):
                 raise ValueError, "MaxPositiveEstimateCombiner needs learners (such " \
                       " as %s) with state 'estimates' enabled" % clf
             all_cls.append(cls)
-            all_estimates.append(clf.ca.estimates)
+            all_estimates.append(np.asarray(clf.ca.estimates).reshape(-1,1))
 
         all_cls.append(self._default_class)
         all_estimates.append(np.zeros(all_estimates[0].shape))
