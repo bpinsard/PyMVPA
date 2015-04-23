@@ -1070,10 +1070,11 @@ class MaxPositiveEstimateCombiner(PredictionsCombiner):
     estimates = ConditionalAttribute(enabled=True,
         doc="Predictions from all classifiers are stored")
     
-    def __init__(self, classes, default_class, **kwargs):
+    def __init__(self, classes, default_class, default_class_threshold=0, **kwargs):
         PredictionsCombiner.__init__(self, **kwargs)
         self._classes = classes
         self._default_class = default_class
+        self._default_class_threshold = default_class_threshold
 
     def __call__(self, clfs, dataset):
         """Actual callable - perform meaning
@@ -1093,7 +1094,7 @@ class MaxPositiveEstimateCombiner(PredictionsCombiner):
             all_estimates.append(np.asarray(clf.ca.estimates).reshape(-1,1))
 
         all_cls.append(self._default_class)
-        all_estimates.append(np.zeros(all_estimates[0].shape))
+        all_estimates.append(np.zeros(all_estimates[0].shape)+self._default_class_threshold)
 
         ca = self.ca
         ca.estimates = np.hstack(all_estimates)
@@ -1103,7 +1104,7 @@ class MaxPositiveEstimateCombiner(PredictionsCombiner):
 
 class OneClassClassifier(CombinedClassifier):
     
-    def __init__(self, clfs, default_class, **kwargs):
+    def __init__(self, clfs, default_class, default_class_threshold=0, **kwargs):
         """
         Parameters
         ----------
@@ -1117,10 +1118,11 @@ class OneClassClassifier(CombinedClassifier):
         kwargs['clfs'] = [clf[1] for clf in clfs]
         self.__classes = [clf[0] for clf in clfs]
         if 'combiner' not in kwargs:
-            kwargs['combiner'] = MaxPositiveEstimateCombiner(self.__classes, default_class)
+            kwargs['combiner'] = MaxPositiveEstimateCombiner(self.__classes, default_class, default_class_threshold)
 
         CombinedClassifier.__init__(self, **kwargs)
         self._default_class = default_class
+        self._default_class_threshold = default_class_threshold
         self.__clfs = clfs
         
     def _train(self, dataset):
