@@ -41,7 +41,8 @@ class SurfaceQueryEngine(QueryEngineInterface):
     '''
 
     def __init__(self, surface, radius, distance_metric='dijkstra',
-                    fa_node_key='node_indices'):
+                 fa_node_key='node_indices',
+                 max_feat=None):
         '''Make a new SurfaceQueryEngine
 
         Parameters
@@ -66,7 +67,8 @@ class SurfaceQueryEngine(QueryEngineInterface):
         self.distance_metric = distance_metric
         self.fa_node_key = fa_node_key
         self._vertex2feature_map = None
-
+        self.max_feat = max_feat
+        
         allowed_metrics = ('dijkstra', 'euclidean')
         if not self.distance_metric in allowed_metrics:
             raise ValueError('distance_metric %s has to be in %s' %
@@ -183,6 +185,8 @@ class SurfaceQueryEngine(QueryEngineInterface):
                                                     self.distance_metric)
 
         v2f = self._vertex2feature_map
+        if self.max_feat:
+            return sum([v2f[node] for node in np.asarray(nearby_nodes.keys())[np.argsort(nearby_nodes.values())[:self.max_feat]]],[])
         return sum((v2f[node] for node in nearby_nodes), [])
 
 
