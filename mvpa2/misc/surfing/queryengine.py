@@ -56,7 +56,8 @@ class SurfaceQueryEngine(QueryEngineInterface):
         fa_node_key: str
             Key for feature attribute that contains node indices
             (default: 'node_indices').
-
+        max_feat: int
+            maximum number of node to return, the closest are selected
         Notes
         -----
         After training this instance on a dataset and calling it with
@@ -180,13 +181,17 @@ class SurfaceQueryEngine(QueryEngineInterface):
             raise KeyError('vertex_id should be integer in range(%d)' %
                                                 self.surface.nvertices)
 
-        nearby_nodes = self.surface.circlearound_n2d(vertex_id,
-                                                    self.radius,
-                                                    self.distance_metric)
-
         v2f = self._vertex2feature_map
         if self.max_feat:
-            return sum([v2f[node] for node in np.asarray(nearby_nodes.keys())[np.argsort(nearby_nodes.values())[:self.max_feat]]],[])
+            nearby_nodes = self.surface.circlearound_n2d(vertex_id,
+                                                         self.radius,
+                                                         self.distance_metric,
+                                                         max_neighbors=self.max_feat)
+        else:
+            nearby_nodes = self.surface.circlearound_n2d(vertex_id,
+                                                         self.radius,
+                                                         self.distance_metric)
+            
         return sum((v2f[node] for node in nearby_nodes), [])
 
 

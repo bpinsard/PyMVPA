@@ -279,7 +279,7 @@ class Surface(object):
 
         return dict(self._nbrs) # make a copy
 
-    def circlearound_n2d(self, src, radius, metric='euclidean'):
+    def circlearound_n2d(self, src, radius, metric='euclidean', max_neighbors=None):
         '''Finds the distances from a center node to surrounding nodes.
 
         Parameters
@@ -308,13 +308,68 @@ class Surface(object):
                                             if d <= radius)
 
         elif shortmetric == 'd':
-            c = self.dijkstra_distance(src, maxdistance=radius)
+            if max_neighbors is None:
+                c = self.dijkstra_distance(src, maxdistance=radius)
+            else:
+                c = self.dijkstra_nearest(src, max_neighbors, maxdistance=radius)
 
         else:
             raise Exception("Unknown metric %s" % metric)
 
         return c
 
+    def dijkstra_nearest(self, src, max_neighbors, maxdistance=np.inf):
+        '''Computes Dijkstra distance from one node to the k closest nearest neighbors
+
+        Parameters
+        ----------
+        src : int
+            Index of center (source) node
+        max_neighbors: int
+            Maximum number of neighbors to return, closest are selected
+        maxdistance: float (default: inf)
+            Maximum distance for a node to qualify as a 'surrounding' node.
+
+        Returns:
+        --------
+        n2d : dict
+            A dict "n2d" so that n2d[j]=d" is the distance "d" from node
+            "src" to node "j".
+
+        Note
+        ----
+        Preliminary analyses show that the Dijkstra distance gives very similar
+        results to geodesic distances (unpublished results, NNO)
+        '''
+
+        fdist = dict()  # final distances
+        candidates = dict()
+
+        # queue of candidates, sorted by tentative distance
+        candidates[src] = 0
+
+        nbrs = self.neighbors
+
+        while candidates and len(fdist) < max_neighbors:
+            min_idx = np.argmin(candidates.values())
+            d = candidates.values()[min_idx]
+            i = candidates.keys()[min_idx]
+            del candidates[i]
+
+            if i in fdist:
+                continue # we already have a final distance for this node
+
+            nbr = nbrs[i] # neighbours of current candidate
+
+            for nbr_i, nbr_d in nbr.items():
+                dnew = d + nbr_d
+                
+                if nbr_i not in fdist and dnew < maxdistance:
+                    candidates[nbr_i] = dnew
+            fdist[i] = d
+
+        return fdist
+        
 
     def dijkstra_distance(self, src, maxdistance=None):
         '''Computes Dijkstra distance from one node to surrounding nodes
