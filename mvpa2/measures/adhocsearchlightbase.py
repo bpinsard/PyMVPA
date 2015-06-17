@@ -513,7 +513,7 @@ class SimpleStatBaseSearchlight(BaseSearchlight):
                 # somewhat silly but a way which allows to use pre-crafted
                 # error functions without a chance to screw up
                 for i, fpredictions in enumerate(predictions.T):
-                    results[isplit, i] = errorfx(fpredictions, targets)
+                    results[isplit, i] = errorfx(ulabels[fpredictions], ulabels[targets])
 
 
         if __debug__:
