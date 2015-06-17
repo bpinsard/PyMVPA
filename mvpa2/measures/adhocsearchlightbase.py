@@ -407,7 +407,7 @@ class SimpleStatBaseSearchlight(BaseSearchlight):
         self._reserve_pl_stats_space((nlabels, ) + s_shape)
 
         # results
-        error_function_shape = errorfx([0],[0]).shape
+        error_function_shape = errorfx(ulabels[:1],ulabels[:1]).shape
         results = np.zeros((nsplits,) + r_shape + error_function_shape)
 
         # 4. Lets deduce all neighbors... might need to be RF into the
