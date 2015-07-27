@@ -418,10 +418,6 @@ class SimpleStatBaseSearchlight(BaseSearchlight):
         self._reserve_pl_stats_space((nlabels, ) + s_shape)
 
         # results
-<<<<<<< HEAD
-        error_function_shape = errorfx(ulabels[:1],ulabels[:1]).shape
-        results = np.zeros((nsplits,) + r_shape + error_function_shape)
-=======
         if errorfx is mean_mismatch_error:
             # if we know how it would look like, prepare the storage
             results = np.zeros((nsplits,) + r_shape)
@@ -430,7 +426,6 @@ class SimpleStatBaseSearchlight(BaseSearchlight):
             results = []
 
         all_targets, all_cvfolds = [], []
->>>>>>> master
 
         # 4. Lets deduce all neighbors... might need to be RF into the
         #    parallel part later on
