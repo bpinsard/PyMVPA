@@ -533,20 +533,20 @@ class SimpleStatBaseSearchlight(BaseSearchlight):
                 results.append(
                     np.array([errorfx(ulabels[fpredictions], ulabels[targets])
                               for fpredictions in predictions.T]))
-                all_cvfolds += [isplit] #* len(targets)
+                all_cvfolds += [isplit] * len(results[-1])
 
             else:
                 # and if no errorfx -- we just need to assign original
                 # labels to the predictions BUT keep in mind that it is a matrix
                 results.append(assign_ulabels(predictions))
                 all_targets += [ulabels[i] for i in targets]
-                all_cvfolds += [isplit]  #* len(targets)
+                all_cvfolds += [isplit] * len(targets)
 
             pass  # end of the split loop
 
         if isinstance(results, list):
             # we have just collected them, now they need to be vstacked
-            results = np.asarray(results)
+            results = np.vstack(results)
             assert(results.ndim >= 2)
 
         if __debug__:
