@@ -342,21 +342,21 @@ class Surface(object):
         results to geodesic distances (unpublished results, NNO)
         '''
 
-        fdist = dict()  # final distances
-        candidates = dict()
 
-        # queue of candidates, sorted by tentative distance
-        candidates[src] = 0
+        fdist = dict()
+        candidates_ids = [src]
+        candidates_dist = [0]
 
         nbrs = self.neighbors
 
-        while candidates and len(fdist) < max_neighbors:
-            min_idx = np.argmin(candidates.values())
-            d = candidates.values()[min_idx]
-            i = candidates.keys()[min_idx]
-            del candidates[i]
+        while candidates_ids and len(fdist) < max_neighbors:
+            min_idx = np.argmin(candidates_dist)
+            d = candidates_dist[min_idx]
+            i = candidates_ids[min_idx]
+            del candidates_ids[min_idx], candidates_dist[min_idx]
 
             if i in fdist:
+                fdist[i] = min(d, fdist[i])
                 continue # we already have a final distance for this node
 
             nbr = nbrs[i] # neighbours of current candidate
@@ -365,7 +365,8 @@ class Surface(object):
                 dnew = d + nbr_d
                 
                 if nbr_i not in fdist and dnew < maxdistance:
-                    candidates[nbr_i] = dnew
+                    candidates_ids.append(nbr_i)
+                    candidates_dist.append(dnew)
             fdist[i] = d
 
         return fdist
