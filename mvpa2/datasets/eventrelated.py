@@ -385,7 +385,7 @@ def extract_boxcar_event_samples(
 
 def fit_event_hrf_model(
         ds, events, time_attr, condition_attr='targets', design_kwargs=None,
-        glmfit_kwargs=None, regr_attrs=None):
+        glmfit_kwargs=None, regr_attrs=None, return_model=False):
     """Fit a GLM with HRF regressor and yield a dataset with model parameters
 
     A univariate GLM is fitted for each feature and model parameters are
@@ -444,6 +444,11 @@ def fit_event_hrf_model(
     regr_attrs : list
       List of dataset sample attribute names that shall be extracted from the
       input dataset and used as additional regressors in the design matrix.
+    return_model : bool
+      Flag whether to included the fitted GLM model in the returned dataset.
+      For large input data this can be problematic, as the model may contain
+      the residuals (same size is input data), hence multiplies the memory
+      demand. Off by default.
 
     Returns
     -------
@@ -451,9 +456,9 @@ def fit_event_hrf_model(
       One sample for each regressor/condition in the design matrix is returned.
       The condition names are included as a sample attribute with the name
       specified by the ``condition_attr`` argument.  The actual design
-      regressors are included as ``regressors`` sample attribute. An instance
-      with the fitted NiPy GLM results is included as a dataset attribute
-      ``model``, and can be used for computing contrasts subsequently.
+      regressors are included as ``regressors`` sample attribute. If enabled,
+      an instance with the fitted NiPy GLM results is included as a dataset
+      attribute ``model``, and can be used for computing contrasts subsequently.
 
     Examples
     --------
@@ -471,7 +476,8 @@ def fit_event_hrf_model(
     ...                   time_attr='time_coords',
     ...                   condition_attr='condition',
     ...                   design_kwargs=dict(drift_model='blank'),
-    ...                   glmfit_kwargs=dict(model='ols'))
+    ...                   glmfit_kwargs=dict(model='ols'),
+    ...                   return_model=True)
     >>> print hrf_estimates.sa.condition
     ['one' 'two']
     >>> print hrf_estimates.shape
@@ -535,15 +541,24 @@ def fit_event_hrf_model(
     # auto-generated
     if design_kwargs is None:
         design_kwargs = {}
+
     if not regr_attrs is None:
         names = []
         regrs = []
         for attr in regr_attrs:
-            names.append(attr)
-            regrs.append(ds.sa[attr].value)
-        if len(regrs) < 2:
-            regrs = [regrs]
-        regrs = np.hstack(regrs).T
+            regr = ds.sa[attr].value
+            # add rudimentary dimension for easy hstacking later on
+            if regr.ndim < 2:
+                regr = regr[:, np.newaxis]
+            if regr.shape[1] == 1:
+                names.append(attr)
+            else:
+                #  add one per each column of the regressor
+                for i in xrange(regr.shape[1]):
+                    names.append("%s.%d" % (attr, i))
+            regrs.append(regr)
+        regrs = np.hstack(regrs)
+
         if 'add_regs' in design_kwargs:
             design_kwargs['add_regs'] = np.hstack((design_kwargs['add_regs'],
                                                    regrs))
@@ -553,6 +568,7 @@ def fit_event_hrf_model(
             design_kwargs['add_reg_names'].extend(names)
         else:
             design_kwargs['add_reg_names'] = names
+
     design_matrix = make_dmtx(ds.sa[time_attr].value,
                               paradigm,
                               **design_kwargs)
@@ -565,7 +581,8 @@ def fit_event_hrf_model(
     # GLM
     glm = NiPyGLMMapper([], glmfit_kwargs=glmfit_kwargs,
             add_regs=glm_regs,
-            return_design=True, return_model=True, space=glm_condition_attr)
+            return_design=True, return_model=return_model,
+            space=glm_condition_attr)
 
     model_params = glm(ds)
 

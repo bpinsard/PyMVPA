@@ -259,12 +259,11 @@ notebooks: notebooks-stamp
 notebooks-stamp: examples2rst
 	mkdir -p $(NOTEBOOKBUILD_DIR)
 	tools/rst2ipnbpy \
-		--baseurl http://pymvpa.org \
+		--baseurl http://pymvpa.org/examples \
 		--apiref_baseurl http://pymvpa.org/generated \
 		--glossary_baseurl http://pymvpa.org/glossary.html \
 		--outdir $(NOTEBOOKBUILD_DIR) \
 		--exclude doc/source/tutorial_prerequisites.rst \
-		--exclude doc/source/examples/searchlight_surf.rst \
 		--verbose \
 		doc/source/tutorial_*.rst doc/source/examples/*.rst
 	touch $@
@@ -469,7 +468,7 @@ testexamples: te-svdclf te-smlr te-sensanas te-pylab_2d \
               te-erp_plot te-match_distribution te-permutation_test \
               te-searchlight_minimal te-smlr te-start_easy te-topo_plot \
               te-gpr te-gpr_model_selection0 te-mri_plot te-searchlight \
-              te-clfs_examples
+              te-eventrelated te-clfs_examples
 
 testdocstrings: dt-mvpa
 
@@ -545,6 +544,8 @@ testsuite:
 	 grep -v -e 'mvpa.\.base\.dochelpers' \
 			 -e 'mvpa.\.\(tests\|testing\|sandbox\|support\)' \
 			 -e 'mvpa.\.misc\.args' \
+			 -e 'mvpa.\.algorithms\.benchmarks' \
+			 -e 'mvpa.\.misc\.surfing\.volgeom' \
 			 -e 'mvpa.\.clfs\.\(libsvmc\|sg\|spam\)' \
 	| while read i; do \
 	 grep -q "^ *$$i" mvpa2/suite.py || \
