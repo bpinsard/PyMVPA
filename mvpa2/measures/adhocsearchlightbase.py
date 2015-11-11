@@ -530,10 +530,11 @@ class SimpleStatBaseSearchlight(BaseSearchlight):
             elif errorfx:
                 # somewhat silly but a way which allows to use pre-crafted
                 # error functions without a chance to screw up
-                results.append(
+                result = np.atleast_2d(
                     np.array([errorfx(ulabels[fpredictions], ulabels[targets])
                               for fpredictions in predictions.T]))
-                all_cvfolds += [isplit] * len(results[-1])
+                results.append(result)
+                all_cvfolds += [isplit] * result.shape[0]
 
             else:
                 # and if no errorfx -- we just need to assign original
