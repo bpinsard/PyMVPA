@@ -79,7 +79,9 @@ class SurfaceQueryEngine(QueryEngineInterface):
             # Pre-compute neighbor information (and ignore the output).
             surface.neighbors
 
-    def __repr__(self, prefixes=[]):
+    def __repr__(self, prefixes=None):
+        if prefixes is None:
+            prefixes = []
         return super(SurfaceQueryEngine, self).__repr__(
                    prefixes=prefixes
                    + _repr_attrs(self, ['surface'])
@@ -229,7 +231,9 @@ class SurfaceVerticesQueryEngine(QueryEngineInterface):
         self._map_voxel_coord = None
         self._add_fa = add_fa
 
-    def __repr__(self, prefixes=[]):
+    def __repr__(self, prefixes=None):
+        if prefixes is None:
+            prefixes = []
         return super(SurfaceVerticesQueryEngine, self).__repr__(
             prefixes=prefixes
             + _repr_attrs(self, ['voxsel'])
@@ -490,7 +494,9 @@ class SurfaceVoxelsQueryEngine(SurfaceVerticesQueryEngine):
         self.fallback_euclidean_distance = fallback_euclidean_distance
 
 
-    def __repr__(self, prefixes=[]):
+    def __repr__(self, prefixes=None):
+        if prefixes is None:
+            prefixes = []
         prefixes_ = prefixes + _repr_attrs(self,
                                           ['fallback_euclidean_distance'],
                                           default=False)
@@ -539,7 +545,7 @@ class SurfaceVoxelsQueryEngine(SurfaceVerticesQueryEngine):
         # a voxel id (i.e. they are mapped to None). Remove those from the
         # output
         self._feature_id2vertex_id = dict((f, v) for f, v in fv
-                                                if not v is None)
+                                                if v is not None)
 
 
     def untrain(self):
