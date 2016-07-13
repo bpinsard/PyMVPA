@@ -555,7 +555,7 @@ class SimpleStatBaseSearchlight(BaseSearchlight):
                 # somewhat silly but a way which allows to use pre-crafted
                 # error functions without a chance to screw up
                 result = np.atleast_2d(
-                    np.array([errorfx(fpredictions, targets)
+                    np.array([errorfx(ulabels[fpredictions], ulabels[targets])
                               for fpredictions in predictions.T]))
                 results.append(result)
                 all_cvfolds += [isplit] * result.shape[0]
