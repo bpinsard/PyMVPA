@@ -1069,6 +1069,86 @@ class BinaryClassifier(ProxyClassifier):
         return predictions
 
 
+class MaxPositiveEstimateCombiner(PredictionsCombiner):
+    """Provides a decision by choosing the class which classifier has higher
+    estimate value
+    """
+
+    predictions = ConditionalAttribute(enabled=True,
+        doc="Mean predictions")
+
+    estimates = ConditionalAttribute(enabled=True,
+        doc="Predictions from all classifiers are stored")
+    
+    def __init__(self, classes, default_class, default_class_threshold=0, **kwargs):
+        PredictionsCombiner.__init__(self, **kwargs)
+        self._classes = classes
+        self._default_class = default_class
+        self._default_class_threshold = default_class_threshold
+
+    def __call__(self, clfs, dataset):
+        """Actual callable - perform meaning
+
+        """
+        if len(clfs)==0:
+            return []                   # to don't even bother
+
+        all_estimates = []
+        all_cls = []
+        for cls, clf in zip(self._classes,clfs):
+            # Lets check first if necessary conditional attribute is enabled
+            if not clf.ca.is_enabled("estimates"):
+                raise ValueError, "MaxPositiveEstimateCombiner needs learners (such " \
+                      " as %s) with state 'estimates' enabled" % clf
+            all_cls.append(cls)
+            all_estimates.append(np.asarray(clf.ca.estimates).reshape(-1,1))
+
+        all_cls.append(self._default_class)
+        all_estimates.append(np.zeros(all_estimates[0].shape)+self._default_class_threshold)
+
+        ca = self.ca
+        ca.estimates = np.hstack(all_estimates)
+        ca.predictions = predictions = np.asarray(all_cls)[np.argmax(ca.estimates,1)]
+
+        return predictions
+
+class OneClassClassifier(CombinedClassifier):
+    
+    def __init__(self, clfs, default_class, default_class_threshold=0, **kwargs):
+        """
+        Parameters
+        ----------
+        clf : Classifier
+          classifier to use
+        poslabels : list
+          list of labels which are treated as +1 category
+        neglabels : list
+          list of labels which are treated as -1 category
+        """
+        kwargs['clfs'] = [clf[1] for clf in clfs]
+        self.__classes = [clf[0] for clf in clfs]
+        if 'combiner' not in kwargs:
+            kwargs['combiner'] = MaxPositiveEstimateCombiner(self.__classes, default_class, default_class_threshold)
+
+        CombinedClassifier.__init__(self, **kwargs)
+        self._default_class = default_class
+        self._default_class_threshold = default_class_threshold
+        self.__clfs = clfs
+        
+    def _train(self, dataset):
+        """Train `OneClassClassifier`
+        """
+        for cls, clf in self.__clfs:
+            dsbin = dataset[dataset.targets==cls]
+            dsbin.targets = np.ones(dsbin.nsamples, dtype=np.int8)
+            clf.train(dsbin)
+
+    def _predict(self, dataset):
+        """Predict using `OneClassClassifier`
+        """
+        predictions = CombinedClassifier._predict(self, dataset)
+        return predictions
+
 
 class MulticlassClassifier(CombinedClassifier):
     """Perform multiclass classification using a list of binary classifiers.
