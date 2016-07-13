@@ -126,6 +126,7 @@ class Partitioner(Node):
             pds.sa[self.get_space()] = pattr
             pds.a[self.get_space() + "_set"] = iparts
             pds.a['lastpartitionset'] = iparts == (n_cfgs - 1)
+            pds = self._postcall(pds, pds)
             yield pds
 
 
@@ -656,4 +657,5 @@ class ExcludeTargetsCombinationsPartitioner(Node):
                         = self.partition_assign
             pds = ds.copy(deep=False)
             pds.sa[self.space] = partitioning
+            pds = self._postcall(pds, pds)
             yield pds

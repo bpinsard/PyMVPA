@@ -164,4 +164,5 @@ class Splitter(Node):
                 # otherwise just assign a new value
                 split_ds.a.lastsplit = lastsplit
 
+            split_ds = self._postcall(split_ds, split_ds)
             yield split_ds
