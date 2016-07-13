@@ -41,7 +41,8 @@ class SurfaceQueryEngine(QueryEngineInterface):
     '''
 
     def __init__(self, surface, radius, distance_metric='dijkstra',
-                    fa_node_key='node_indices'):
+                 fa_node_key='node_indices',
+                 max_feat=None):
         '''Make a new SurfaceQueryEngine
 
         Parameters
@@ -55,7 +56,8 @@ class SurfaceQueryEngine(QueryEngineInterface):
         fa_node_key: str
             Key for feature attribute that contains node indices
             (default: 'node_indices').
-
+        max_feat: int
+            maximum number of node to return, the closest are selected
         Notes
         -----
         After training this instance on a dataset and calling it with
@@ -66,7 +68,8 @@ class SurfaceQueryEngine(QueryEngineInterface):
         self.distance_metric = distance_metric
         self.fa_node_key = fa_node_key
         self._vertex2feature_map = None
-
+        self.max_feat = max_feat
+        
         allowed_metrics = ('dijkstra', 'euclidean')
         if not self.distance_metric in allowed_metrics:
             raise ValueError('distance_metric %s has to be in %s' %
@@ -180,11 +183,17 @@ class SurfaceQueryEngine(QueryEngineInterface):
             raise KeyError('vertex_id should be integer in range(%d)' %
                                                 self.surface.nvertices)
 
-        nearby_nodes = self.surface.circlearound_n2d(vertex_id,
-                                                    self.radius,
-                                                    self.distance_metric)
-
         v2f = self._vertex2feature_map
+        if self.max_feat:
+            nearby_nodes = self.surface.circlearound_n2d(vertex_id,
+                                                         self.radius,
+                                                         self.distance_metric,
+                                                         max_neighbors=self.max_feat)
+        else:
+            nearby_nodes = self.surface.circlearound_n2d(vertex_id,
+                                                         self.radius,
+                                                         self.distance_metric)
+            
         return sum((v2f[node] for node in nearby_nodes), [])
 
 
