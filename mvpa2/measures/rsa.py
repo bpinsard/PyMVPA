@@ -10,18 +10,100 @@
 
 __docformat__ = 'restructuredtext'
 
-from itertools import combinations, product
+if __debug__:
+    from mvpa2.base import debug
+
+from itertools import combinations, combinations_with_replacement, product
 import numpy as np
+import tempfile, os
+import time
+
+import mvpa2
+from mvpa2.base.progress import ProgressBar
+from mvpa2.base.types import is_datasetlike
 from mvpa2.measures.base import Measure
+from mvpa2.measures.searchlight import BaseSearchlight, Searchlight
 from mvpa2.datasets.base import Dataset
 from mvpa2.base import externals
 from mvpa2.base.param import Parameter
 from mvpa2.base.constraints import EnsureChoice
+from mvpa2.base.dataset import hstack
+from mvpa2.base.state import ConditionalAttribute
 from mvpa2.mappers.fx import mean_group_sample
+from mvpa2.generators.splitters import Splitter
 
 if externals.exists('scipy', raise_=True):
     from scipy.spatial.distance import pdist, squareform, cdist
     from scipy.stats import rankdata, pearsonr
+    import scipy.sparse
+
+
+class CrossNobis(Measure):
+
+    """Compute cross-validated mahalanobis distance for samples in a dataset
+
+    This `Measure` can be trained on part of the dataset (for example,
+    a partition) and called on another partition. It can be used in
+    cross-validation to generate cross-validated RSA.
+    Returns flattened dissimilarity values.
+    """
+    
+    def __init__(self, **kwargs):
+        Measure.__init__(self, **kwargs)
+        self._train_ds = None
+        
+    def _train(self, ds):
+        self._train_ds = None
+
+        targets_sa_name = self.get_space()
+        targets_sa = ds.sa[targets_sa_name]
+        self.ulabels = ulabels = targets_sa.unique
+        
+        targets_sort_idx = np.argsort(targets_sa.value)
+
+        self._train_pairs = Dataset(
+            [ds.samples[i]-ds.samples[j] for ii,i in enumerate(targets_sort_idx) for j in targets_sort_idx[ii+1:]])
+        self._train_pairs.targets = np.asarray(
+            [(targets_sa[i], targets_sa[j]) for ii,i in enumerate(targets_sort_idx) for j in targets_sort_idx[ii+1:] ])
+        
+        self.is_trained = True
+
+    def _call(self, ds):
+        n_ulabels = len(self.ulabels)
+        pair_dists = np.zeros((n_ulabels,n_ulabels))
+        pair_counts = np.zeros((n_ulabels,n_ulabels), dtype=np.int)
+        
+        targets_sa_name = self.get_space()
+        targets_sa = ds.sa[targets_sa_name]
+        ulabels = targets_sa.unique
+        label2index = dict((l, il) for il, l in enumerate(ulabels))
+
+        if np.any(ulabels != self.ulabels):
+            raise ValueError('Datasets should have same targets for dissimilarity.')
+        
+        targets_sort_idx = np.argsort(targets_sa.value)        
+
+        test_pairs = Dataset(
+            [ds.samples[i]-ds.samples[j] for ii,i in enumerate(targets_sort_idx) for j in targets_sort_idx[ii+1:]])
+        test_pairs.targets = np.asarray(
+            [(targets_sa[i], targets_sa[j]) for ii,i in enumerate(targets_sort_idx) for j in targets_sort_idx[ii+1:] ])
+        
+        for ii in range(self._train_pairs.nsamples):
+            pair1 = self._train_pairs.targets[ii]
+            for jj in range(test_pairs.nsamples):
+                pair2 = test_pairs.targets[jj]
+                if np.all(pair1 == pair2):
+                    a,b = label2index[pair1[0]], label2index[pair1[1]]
+                    pair_dists[a,b] += self._train_pairs.samples[ii].dot(test_pairs.samples[jj])/ds.nfeatures
+                    pair_counts[a,b] += 1
+
+        pair_dists /= pair_counts
+        
+        distds = Dataset(pair_dists, 
+                         sa=dict(targets=ulabels),
+                         fa=dict(targets=ulabels))
+
+        return distds
 
 
 class CDist(Measure):
@@ -215,7 +297,7 @@ class PDistConsistency(Measure):
             dsm = pdist(data, self.params.pairwise_metric)
             dsms.append(dsm)
             chunks.append(chunk)
-        dsms = np.vstack(dsms)
+        dsms = np.hstack(dsms)
 
         if self.params.consistency_metric == 'spearman':
             dsms = np.apply_along_axis(rankdata, 1, dsms)
@@ -408,7 +490,442 @@ class Regression(Measure):
         sa = ['coef' + str(i) for i in range(len(coefs))]
 
         if self.params.fit_intercept:
-            coefs = np.vstack((coefs, reg_.intercept_))
+            coefs = vstack((coefs, reg_.intercept_))
             sa += ['intercept']
 
         return Dataset(coefs, sa={'coefs': sa})
+
+
+class CrossNobisSearchlight(Searchlight):
+
+    roi_shrinkages = ConditionalAttribute(enabled=True,
+        doc="The optimal shrinkage of the covariance matrix for each searchlight.")
+
+    def __init__(self, generator, queryengine,
+                 splitter=None,
+                 **kwargs):
+        """Initialize the base class for "naive" searchlight classifiers
+
+        Parameters
+        ----------
+        generator : `Generator`
+          Some `Generator` to prepare partitions for cross-validation.
+          It must not change "targets", thus e.g. no AttributePermutator's
+        splitter : Splitter, optional
+          Which will be used to split partitioned datasets.  If None specified
+          then standard one operating on partitions will be used
+        """
+
+        # init base class first
+        Searchlight.__init__(self, None, queryengine, **kwargs)
+
+        self._generator = generator
+        self._splitter = splitter
+
+        self.__all_pairs = None
+
+    def _untrain(self):
+        super(CrossNobisSearchlight, self)._untrain()
+        self.__all_pairs = None    
+
+    def _train(self, ds=None):
+        """ compute sparse covariance matrix
+        """
+
+        generator = self._generator
+        qe = self.queryengine
+        splitter = Splitter(attr=generator.get_space(), attr_values=[1, 2]) \
+            if self._splitter is None \
+            else self._splitter
+        nproc = self.nproc
+
+        # estimate the residual covariance from the training sets only
+        self._splits_cov = None
+        if ds is not None:
+            if __debug__:
+                debug('SLC',
+                      'Phase 2b. Precompute the feature covariance per split')
+            externals.exists('skl', raise_=True) 
+            from sklearn.covariance import ledoit_wolf_shrinkage
+               
+            dataset_indicies = Dataset(np.arange(ds.nsamples), sa=ds.sa)
+            partitions = list(generator.generate(dataset_indicies)) \
+                         if generator \
+                            else [dataset_indicies]
+            
+            train_sets = [list(splitter.generate(ds_))[0] for ds_ in partitions]
+            self._splits_cov = []
+            self._splits_cov2 = []
+            self._splits_cov_nsamples = []
+
+            if __debug__:
+                debug('SLC',
+                      'Phase 2b1. Compute neighborhoods')
+            sl_ext_conn = set()
+
+            # TODO: make parallel if possible
+            def neighs_cross(f):
+                return list(combinations_with_replacement(sorted(self._queryengine[f]),2))
+            for f in xrange(ds.nfeatures):
+                sl_ext_conn.update(neighs_cross(f))
+
+            sl_ext_conn = np.sort(np.array(list(sl_ext_conn),dtype=[('row',np.uint32),('col',np.uint32)]))
+            self._sl_ext_conn = sl_ext_conn.view(np.uint32).reshape(-1,2).T.copy()
+            del sl_ext_conn
+
+            def _split_cov(split_idx, resid, blocksize = int(1e5)):
+                
+                cov_tmp = np.empty(self._sl_ext_conn.shape[1])
+                cov_tmp2 = np.empty(self._sl_ext_conn.shape[1])
+                
+                resid2 = resid**2
+                nsamp = len(resid)
+
+                for i in range(int(len(cov_tmp)/blocksize+1)):
+                    slz = slice(i*blocksize,(i+1)*blocksize)
+                    np.einsum('ij, ij->j',
+                              resid[:,self._sl_ext_conn[0,slz]],
+                              resid[:,self._sl_ext_conn[1,slz]],
+                              out=cov_tmp[slz])
+                    np.einsum('ij, ij->j',
+                              resid2[:,self._sl_ext_conn[0,slz]],
+                              resid2[:,self._sl_ext_conn[1,slz]],
+                              out=cov_tmp2[slz])
+                cov_tmp /= nsamp
+                cov_tmp2 /= nsamp
+                del resid, resid2
+                if __debug__:
+                    debug('SLC','completed split %d/%d'%(split_idx,len(train_sets)))
+                return cov_tmp, cov_tmp2, nsamp
+            
+            if nproc is not None and nproc > 1:
+                import pprocess
+                nsplits = len(train_sets)
+                nproc_needed = min(nsplits, nproc)
+                p_results = pprocess.Map(limit=nproc_needed)
+                if __debug__:
+                    debug('SLC', "Compute covariance: starting off %s child processes for nsplits=%i"
+                          % (nproc_needed, nsplits))
+                compute = p_results.manage(
+                    pprocess.MakeParallel(_split_cov))
+                for split_idx, train_idx in enumerate(train_sets):
+                    compute(split_idx, ds.samples[train_idx.samples.ravel()])
+                for cov_tmp, cov_tmp2, nsamp in p_results:
+                    self._splits_cov.append(cov_tmp)
+                    self._splits_cov2.append(cov_tmp2)
+                    self._splits_cov_nsamples.append(nsamp)                    
+            else:
+                for split_idx, train_idx in enumerate(train_sets):
+                    if __debug__:
+                        debug('SLC',
+                              'Phase 2b2. Compute covariances, split %d/%d'%(split_idx, len(train_sets)),cr=True)
+                    
+                    cov_tmp, cov_tmp2, nsamp = _split_cov(split_idx, ds.samples[train_idx.samples.ravel()])
+                    self._splits_cov.append(cov_tmp)
+                    self._splits_cov2.append(cov_tmp2)
+                    self._splits_cov_nsamples.append(nsamp)
+
+
+    def _sl_call(self, dataset, roi_ids, nproc):
+        """Call to CrossNobisSearchlight
+        """
+        
+        # Local bindings
+        generator = self._generator
+        qe = self.queryengine
+
+        if __debug__:
+            time_start = time.time()
+
+        targets_sa_name = self.get_space()
+        targets_sa = dataset.sa[targets_sa_name]
+
+        if __debug__:
+            debug_slc_ = 'SLC_' in debug.active
+
+        # get the dataset information into easy vars
+        X = dataset.samples
+        if len(X.shape) != 2:
+            raise ValueError(
+                  'Unlike a classifier, %s (for now) operates on already'
+                  'flattened datasets' % (self.__class__.__name__))
+        labels = targets_sa.value
+        self._ulabels = ulabels = targets_sa.unique
+        nlabels = len(ulabels)
+        label2index = dict((l, il) for il, l in enumerate(ulabels))
+        labels_numeric = np.array([label2index[l] for l in labels])
+        self._ulabels_numeric = [label2index[l] for l in ulabels]
+        # set the feature dimensions
+        nsamples = len(X)
+        nrois = len(roi_ids)
+
+        # 1. Query generator for the splits we will have
+        if __debug__:
+            debug('SLC',
+                  'Phase 1. Initializing partitions using %s on %s'
+                  % (generator, dataset))
+
+        # Lets just create a dummy ds which will store for us actual sample
+        # indicies
+        # XXX we could make it even more lightweight I guess...
+        dataset_indicies = Dataset(np.arange(nsamples), sa=dataset.sa)
+
+        splitter = Splitter(attr=generator.get_space(), attr_values=[1, 2]) \
+            if self._splitter is None \
+            else self._splitter
+
+        partitions = list(generator.generate(dataset_indicies)) \
+            if generator \
+            else [dataset_indicies]
+
+        if __debug__:
+            for p in partitions:
+                assert(p.shape[1] == 1)
+                if not (np.all(p.sa[targets_sa_name].value == labels[p.samples[:, 0]])):
+                    raise NotImplementedError(
+                        "%s does not yet support partitioners altering the targets "
+                        "(e.g. permutators)" % self.__class__)
+
+        nsplits = len(partitions)
+        # ATM we need to keep the splits instead since they are used
+        # in two places in the code: step 2 and 5
+        # We care only about training and testing partitions (i.e. first two)
+        self._splits = list(tuple(splitter.generate(ds_))[:2] for ds_ in partitions)
+        del partitions                    # not used any longer
+        self._nsplits = len(self._splits)
+
+        self._all_pairs = dict()
+        self._all_pairs_targets = dict()
+        self._splits_idx = []
+
+
+        # precompute all the intra-chunk pairs difference used in the cross-validation
+        if __debug__:
+            debug('SLC',
+                  'Phase 2. Precompute all samples paired differences per split')
+
+        for splits2 in self._splits:
+            self._splits_idx.append([])
+            for split in splits2:
+                self._splits_idx[-1].append([])
+                for ii,i in enumerate(split.samples[:,0]):
+                    ti = labels_numeric[i]
+                    for j in split.samples[:ii,0]:
+                        tj = labels_numeric[j]
+                        pair = (i,j)                        
+                        self._splits_idx[-1][-1].append(pair)
+                        if pair in self._all_pairs:
+                            continue
+                        # order the targets to always fill the lower triangle of the dissimilarity matrix
+                        if ti<tj:
+                            pair_targ = (tj,ti)
+                            dif = dataset.samples[j] - dataset.samples[i]
+                        else:
+                            pair_targ = (ti,tj)
+                            dif = dataset.samples[i] - dataset.samples[j]
+                        self._all_pairs[pair] = dif
+                        self._all_pairs_targets[pair] = pair_targ
+        self._all_pairs_idx = self._all_pairs.keys()
+        self._all_pairs = np.asarray([self._all_pairs[k] for k in self._all_pairs_idx])
+        self._all_pairs_targets = np.asarray([self._all_pairs_targets[k] for k in self._all_pairs_idx])
+
+
+        if nproc is not None and nproc > 1:
+            # split all target ROIs centers into `nproc` equally sized blocks
+            nproc_needed = min(len(roi_ids), nproc)
+            nblocks = nproc_needed \
+                      if self.nblocks is None else self.nblocks
+            roi_blocks = np.array_split(roi_ids, nblocks)
+
+            # the next block sets up the infrastructure for parallel computing
+            # this can easily be changed into a ParallelPython loop, if we
+            # decide to have a PP job server in PyMVPA
+            import pprocess
+            p_results = pprocess.Map(limit=nproc_needed)
+            if __debug__:
+                debug('SLC', "Starting off %s child processes for nblocks=%i"
+                      % (nproc_needed, nblocks))
+            compute = p_results.manage(
+                        pprocess.MakeParallel(self._proc_block))
+            for iblock, block in enumerate(roi_blocks):
+                # should we maybe deepcopy the measure to have a unique and
+                # independent one per process?
+                seed = mvpa2.get_random_seed()
+                compute(block, dataset, seed=seed)
+        else:
+            # otherwise collect the results in an 1-item list
+            p_results = [self._proc_block(roi_ids, dataset  )]
+
+        # Finally collect and possibly process results
+        # p_results here is either a generator from pprocess.Map or a list.
+        # In case of a generator it allows to process results as they become
+        # available
+        
+        result_ds = hstack([pr for pr in p_results])
+        return result_ds
+
+    def _proc_block(self, block, ds, seed=None) :
+        """Little helper to capture the parts of the computation that can be
+        parallelized
+
+        Parameters
+        ----------
+        seed
+          RNG seed.  Should be provided e.g. in child process invocations
+          to guarantee that they all seed differently to not keep generating
+          the same sequencies due to reusing the same copy of numpy's RNG
+        block
+          Critical for generating non-colliding temp filenames in case
+          of hdf5 backend.  Otherwise RNGs of different processes might
+          collide in their temporary file names leading to problems.
+        """
+        if seed is not None:
+            mvpa2.seed(seed)
+        if __debug__:
+            debug_slc_ = 'SLC_' in debug.active
+            debug('SLC',
+                  "Starting computing block for %i elements" % len(block))
+            start_time = time.time()
+
+        ulabels = self._ulabels_numeric
+        nlabels = len(ulabels)
+        n_pair_targets = nlabels*(nlabels-1)/2+nlabels
+
+        res = np.zeros(n_pair_targets)
+        counts = np.zeros_like(res, dtype=np.uint)
+
+        target_pairs = [(ul1,ul2) for uli, ul1 in enumerate(self._ulabels) for ul2 in self._ulabels[:uli+1]]
+
+        results = Dataset(np.empty((n_pair_targets*self._nsplits, len(block))),
+                          sa=dict(targets=target_pairs*self._nsplits),
+                          fa=ds[:,block].fa.copy())
+        store_roi_feature_ids = self.ca.is_enabled('roi_feature_ids')
+        if store_roi_feature_ids:
+            results.fa['roi_feature_ids'] = np.zeros(results.nfeatures, dtype=np.object)
+        store_roi_sizes = self.ca.is_enabled('roi_sizes')
+        if store_roi_sizes:
+            results.fa['roi_sizes'] = np.zeros(results.nfeatures, dtype=np.uint)
+        store_roi_center_ids = self.ca.is_enabled('roi_center_ids')
+        if store_roi_center_ids:
+            results.fa['roi_center_ids'] = block
+
+
+        # put rois around all features in the dataset and compute the
+        # measure within them
+        bar = ProgressBar()
+
+        if self._splits_cov is not None:
+            store_roi_shrinkages = self.ca.is_enabled('roi_shrinkages')
+            if store_roi_shrinkages:
+                results.fa['roi_shrinkages'] = np.zeros((results.nfeatures,self._nsplits), dtype=np.float)
+            cov_mask = np.empty(self._sl_ext_conn.shape[1], dtype=np.bool)
+
+        for i, f in enumerate(block):
+            # retrieve the feature ids of all features in the ROI from the query
+            # engine
+            roi_specs = self._queryengine[f]
+
+            if is_datasetlike(roi_specs):
+                # TODO: unittest
+                assert(len(roi_specs) == 1)
+                roi_fids = roi_specs.samples[0]
+            else:
+                roi_fids = roi_specs
+            roi_fids = np.sort(np.asarray(roi_fids,dtype=np.uint32))
+
+            n_fids = len(roi_fids)
+
+            if store_roi_feature_ids:
+                results.fa.roi_feature_ids[i] = roi_fids
+            if store_roi_sizes:
+                results.fa.roi_sizes[i] = n_fids
+
+            if __debug__ and  debug_slc_:
+                debug('SLC_', 'For %r query returned roi_specs %r'
+                      % (f, roi_specs))
+
+            if n_fids<1:
+                results.samples[:,i] = 0
+                continue
+
+            if self._splits_cov is not None:
+                cov_mask.fill(False)
+                # rows are sorted, optimize sparse matrix slicing
+                tmp_idx = []
+                lr_rows = np.searchsorted(self._sl_ext_conn[0],[roi_fids,roi_fids+1],'left')
+                for l,r in zip(*lr_rows):
+                    col_idx = self._sl_ext_conn[1,l:r]
+                    for fid in roi_fids:
+                        cov_mask[l:r] |= (col_idx == fid)
+                cov_mask_idx = np.argwhere(cov_mask).flatten()
+                triu_idx = np.triu_indices(n_fids)
+                cov = np.empty((n_fids, n_fids))
+                cov2 = np.empty((n_fids, n_fids))
+                cov_shrink = np.empty((n_fids, n_fids))
+                inv_cov = np.empty((n_fids, n_fids))
+                delta_ = np.empty((n_fids, n_fids))
+
+            tmp_pairs = self._all_pairs[:, roi_fids]
+
+            for spi, split2_idx in enumerate(self._splits_idx):
+                res.fill(0)
+                counts.fill(0)
+                if self._splits_cov is not None:
+                    cov[triu_idx] = self._splits_cov[spi][cov_mask_idx]
+                    cov2[triu_idx] = self._splits_cov2[spi][cov_mask_idx]
+                    cov[triu_idx[::-1]] = cov[triu_idx]
+                    cov2[triu_idx[::-1]] = cov2[triu_idx]
+                    # ledoit wolf shrinkage
+                    mu = np.sum(np.trace(cov))/n_fids
+                    delta_[:] = cov.copy()
+                    delta_.flat[::n_fids+1] -= mu
+                    delta = (delta_ ** 2).sum() / n_fids
+                    beta_ = 1. / (n_fids * self._splits_cov_nsamples[spi]) * np.sum(cov2 - cov ** 2)
+                    beta = min(beta_, delta)
+                    shrinkage = beta / delta
+                    if store_roi_shrinkages:
+                        results.fa.roi_shrinkages[i,spi] = shrinkage
+                    
+                    cov_shrink[:] = cov*(1-shrinkage)
+                    cov_shrink.flat[::n_fids+1] += mu*shrinkage
+                    inv_cov[:] = np.linalg.inv(cov_shrink)
+
+                test_idxs = np.asarray([self._all_pairs_idx.index(test_idx) for test_idx in split2_idx[1]])
+                for pair_train in split2_idx[0]:
+                    train_idx = self._all_pairs_idx.index(pair_train)
+                    target_train = self._all_pairs_targets[train_idx]
+                    vec_train = tmp_pairs[train_idx]
+                    #vec_train = self._all_pairs[pair_train][roi_fids]
+                    t1,t2 = target_train
+                    res_idx = (t1*(t1-1)/2+t1) + t2
+
+                    self._all_pairs_targets==target_train
+                    
+                    pair_test_idxs = test_idxs[np.all(self._all_pairs_targets[test_idxs]==target_train,1)]
+                    all_test_vecs = tmp_pairs[pair_test_idxs]
+                    #all_test_vecs = np.asarray([self._all_pairs[pair_test][roi_fids] \
+                    #                            for pair_test in split2_idx[1] \
+                    #                            if self._all_pairs_targets[pair_test]==target_train])
+                    if self._splits_cov is not None:
+                        res[res_idx] += vec_train.dot(inv_cov).dot(all_test_vecs.T).sum()/n_fids
+                    else:
+                        res[res_idx] += vec_train.dot(all_test_vecs).sum()/n_fids
+                    counts[res_idx] += len(all_test_vecs)
+                    
+                results.samples[spi*n_pair_targets:(spi+1)*n_pair_targets,i] = res/counts
+
+                
+            if self._splits_cov is not None:
+                del cov, cov2, delta_, cov_shrink, inv_cov, cov_mask_idx
+            del roi_fids
+            
+            if __debug__:
+                msg = 'ROI %i (%i/%i), %i features' % \
+                            (f + 1, i + 1, len(block), n_fids)
+                debug('SLC', bar(float(i + 1) / len(block), msg), cr=True)
+
+        if __debug__:
+            # just to get to new line
+            debug('SLC', '')
+
+        return results
