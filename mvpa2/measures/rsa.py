@@ -81,8 +81,8 @@ class CrossNobis(Measure):
         if np.any(ulabels != self.ulabels):
             raise ValueError('Datasets should have same targets for dissimilarity.')
         
-        targets_sort_idx = np.argsort(targets_sa.value)        
-
+        targets_sort_idx = np.argsort(targets_sa.value)
+        
         test_pairs = Dataset(
             [ds.samples[i]-ds.samples[j] for ii,i in enumerate(targets_sort_idx) for j in targets_sort_idx[ii+1:]])
         test_pairs.targets = np.asarray(
@@ -575,8 +575,8 @@ class CrossNobisSearchlight(Searchlight):
 
             def _split_cov(split_idx, resid, blocksize = int(1e5)):
                 
-                cov_tmp = np.empty(self._sl_ext_conn.shape[1])
-                cov_tmp2 = np.empty(self._sl_ext_conn.shape[1])
+                cov_tmp = np.empty(self._sl_ext_conn.shape[1], dtype=resid.dtype)
+                cov_tmp2 = np.empty(self._sl_ext_conn.shape[1], dtype=resid.dtype)
                 
                 resid2 = resid**2
                 nsamp = len(resid)
@@ -903,9 +903,6 @@ class CrossNobisSearchlight(Searchlight):
                     
                     pair_test_idxs = test_idxs[np.all(self._all_pairs_targets[test_idxs]==target_train,1)]
                     all_test_vecs = tmp_pairs[pair_test_idxs]
-                    #all_test_vecs = np.asarray([self._all_pairs[pair_test][roi_fids] \
-                    #                            for pair_test in split2_idx[1] \
-                    #                            if self._all_pairs_targets[pair_test]==target_train])
                     if self._splits_cov is not None:
                         res[res_idx] += vec_train.dot(inv_cov).dot(all_test_vecs.T).sum()/n_fids
                     else:
