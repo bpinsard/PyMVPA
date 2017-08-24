@@ -27,7 +27,7 @@ from mvpa2.datasets.base import Dataset
 from mvpa2.base import externals
 from mvpa2.base.param import Parameter
 from mvpa2.base.constraints import EnsureChoice
-from mvpa2.base.dataset import hstack
+from mvpa2.base.dataset import hstack, vstack
 from mvpa2.base.state import ConditionalAttribute
 from mvpa2.mappers.fx import mean_group_sample
 from mvpa2.generators.splitters import Splitter
@@ -36,6 +36,7 @@ if externals.exists('scipy', raise_=True):
     from scipy.spatial.distance import pdist, squareform, cdist
     from scipy.stats import rankdata, pearsonr
     import scipy.sparse
+    import scipy.linalg
 
 
 class CrossNobis(Measure):
@@ -494,7 +495,7 @@ class Regression(Measure):
             sa += ['intercept']
 
         return Dataset(coefs, sa={'coefs': sa})
-
+            
 
 class CrossNobisSearchlight(Searchlight):
 
@@ -522,58 +523,54 @@ class CrossNobisSearchlight(Searchlight):
         self._generator = generator
         self._splitter = splitter
 
-        self.__all_pairs = None
+        self._splits_cov = None
 
     def _untrain(self):
         super(CrossNobisSearchlight, self)._untrain()
-        self.__all_pairs = None    
+        self._splits_cov = None
+        del self._sl_ext_conn
 
     def _train(self, ds=None):
         """ compute sparse covariance matrix
         """
 
-        generator = self._generator
-        qe = self.queryengine
-        splitter = Splitter(attr=generator.get_space(), attr_values=[1, 2]) \
+        splitter = Splitter(attr=self._generator.attr) \
             if self._splitter is None \
             else self._splitter
         nproc = self.nproc
 
-        # estimate the residual covariance from the training sets only
+        # estimate the residual covariance
         self._splits_cov = None
         if ds is not None:
             if __debug__:
                 debug('SLC',
                       'Phase 2b. Precompute the feature covariance per split')
-            externals.exists('skl', raise_=True) 
-            from sklearn.covariance import ledoit_wolf_shrinkage
                
             dataset_indicies = Dataset(np.arange(ds.nsamples), sa=ds.sa)
-            partitions = list(generator.generate(dataset_indicies)) \
-                         if generator \
-                            else [dataset_indicies]
             
-            train_sets = [list(splitter.generate(ds_))[0] for ds_ in partitions]
-            self._splits_cov = []
-            self._splits_cov2 = []
-            self._splits_cov_nsamples = []
+            splits = [sp for sp in splitter.generate(dataset_indicies)]
+            self._nsplits = len(splits)
+            self._splits_cov = dict()
+            self._splits_cov2 = dict()
+            self._splits_cov_nsamples = dict()
 
             if __debug__:
                 debug('SLC',
                       'Phase 2b1. Compute neighborhoods')
-            sl_ext_conn = set()
+            if not hasattr(self, '_sl_ext_conn'):
+                sl_ext_conn = set()
+                
+                # TODO: make parallel if possible
+                def neighs_cross(f):
+                    return list(combinations_with_replacement(sorted(self._queryengine[f]),2))
+                for f in xrange(ds.nfeatures):
+                    sl_ext_conn.update(neighs_cross(f))
 
-            # TODO: make parallel if possible
-            def neighs_cross(f):
-                return list(combinations_with_replacement(sorted(self._queryengine[f]),2))
-            for f in xrange(ds.nfeatures):
-                sl_ext_conn.update(neighs_cross(f))
+                sl_ext_conn = np.sort(np.array(list(sl_ext_conn),dtype=[('row',np.uint32),('col',np.uint32)]))
+                self._sl_ext_conn = sl_ext_conn.view(np.uint32).reshape(-1,2).T.copy()
+                del sl_ext_conn
 
-            sl_ext_conn = np.sort(np.array(list(sl_ext_conn),dtype=[('row',np.uint32),('col',np.uint32)]))
-            self._sl_ext_conn = sl_ext_conn.view(np.uint32).reshape(-1,2).T.copy()
-            del sl_ext_conn
-
-            def _split_cov(split_idx, resid, blocksize = int(1e5)):
+            def _split_cov(split_no, resid, blocksize = int(1e5)):
                 
                 cov_tmp = np.empty(self._sl_ext_conn.shape[1], dtype=resid.dtype)
                 cov_tmp2 = np.empty(self._sl_ext_conn.shape[1], dtype=resid.dtype)
@@ -595,35 +592,35 @@ class CrossNobisSearchlight(Searchlight):
                 cov_tmp2 /= nsamp
                 del resid, resid2
                 if __debug__:
-                    debug('SLC','completed split %d/%d'%(split_idx,len(train_sets)))
+                    debug('SLC','completed split %d/%d'%(split_no, self._nsplits))
                 return cov_tmp, cov_tmp2, nsamp
             
             if nproc is not None and nproc > 1:
                 import pprocess
-                nsplits = len(train_sets)
-                nproc_needed = min(nsplits, nproc)
+                nproc_needed = min(self._nsplits, nproc)
                 p_results = pprocess.Map(limit=nproc_needed)
                 if __debug__:
                     debug('SLC', "Compute covariance: starting off %s child processes for nsplits=%i"
-                          % (nproc_needed, nsplits))
+                          % (nproc_needed, self._nsplits))
                 compute = p_results.manage(
                     pprocess.MakeParallel(_split_cov))
-                for split_idx, train_idx in enumerate(train_sets):
-                    compute(split_idx, ds.samples[train_idx.samples.ravel()])
+                for split_no, split_idx in enumerate(splits):
+                    split_attr_value = split_idx.sa[splitter.get_space()].value[0]
+                    compute(split_no, ds.samples[split_idx.samples.ravel()])
                 for cov_tmp, cov_tmp2, nsamp in p_results:
-                    self._splits_cov.append(cov_tmp)
-                    self._splits_cov2.append(cov_tmp2)
-                    self._splits_cov_nsamples.append(nsamp)                    
+                    self._splits_cov[split_attr_value] = cov_tmp
+                    self._splits_cov2[split_attr_value] = cov_tmp2
+                    self._splits_cov_nsamples[split_attr_value] = nsamp
             else:
-                for split_idx, train_idx in enumerate(train_sets):
+                for split_no, split_idx in enumerate(splits):
                     if __debug__:
                         debug('SLC',
-                              'Phase 2b2. Compute covariances, split %d/%d'%(split_idx, len(train_sets)),cr=True)
-                    
-                    cov_tmp, cov_tmp2, nsamp = _split_cov(split_idx, ds.samples[train_idx.samples.ravel()])
-                    self._splits_cov.append(cov_tmp)
-                    self._splits_cov2.append(cov_tmp2)
-                    self._splits_cov_nsamples.append(nsamp)
+                              'Phase 2b2. Compute covariances, split %d/%d'%(split_no, self._nsplits),cr=True)
+                    split_attr_value = split_idx.sa[splitter.get_space()].value[0]
+                    cov_tmp, cov_tmp2, nsamp = _split_cov(split_no, ds.samples[split_idx.samples.ravel()])
+                    self._splits_cov[split_attr_value] = cov_tmp
+                    self._splits_cov2[split_attr_value] = cov_tmp2
+                    self._splits_cov_nsamples[split_attr_value] = nsamp
 
 
     def _sl_call(self, dataset, roi_ids, nproc):
@@ -632,7 +629,6 @@ class CrossNobisSearchlight(Searchlight):
         
         # Local bindings
         generator = self._generator
-        qe = self.queryengine
 
         if __debug__:
             time_start = time.time()
@@ -655,9 +651,7 @@ class CrossNobisSearchlight(Searchlight):
         label2index = dict((l, il) for il, l in enumerate(ulabels))
         labels_numeric = np.array([label2index[l] for l in labels])
         self._ulabels_numeric = [label2index[l] for l in ulabels]
-        # set the feature dimensions
         nsamples = len(X)
-        nrois = len(roi_ids)
 
         # 1. Query generator for the splits we will have
         if __debug__:
@@ -668,67 +662,62 @@ class CrossNobisSearchlight(Searchlight):
         # Lets just create a dummy ds which will store for us actual sample
         # indicies
         # XXX we could make it even more lightweight I guess...
-        dataset_indicies = Dataset(np.arange(nsamples), sa=dataset.sa)
-
-        splitter = Splitter(attr=generator.get_space(), attr_values=[1, 2]) \
+        splitter = Splitter(attr=generator.attr) \
             if self._splitter is None \
             else self._splitter
 
-        partitions = list(generator.generate(dataset_indicies)) \
-            if generator \
-            else [dataset_indicies]
+        dataset_indicies = Dataset(np.arange(nsamples), sa=dataset.sa)
 
-        if __debug__:
-            for p in partitions:
-                assert(p.shape[1] == 1)
-                if not (np.all(p.sa[targets_sa_name].value == labels[p.samples[:, 0]])):
-                    raise NotImplementedError(
-                        "%s does not yet support partitioners altering the targets "
-                        "(e.g. permutators)" % self.__class__)
-
-        nsplits = len(partitions)
-        # ATM we need to keep the splits instead since they are used
-        # in two places in the code: step 2 and 5
-        # We care only about training and testing partitions (i.e. first two)
-        self._splits = list(tuple(splitter.generate(ds_))[:2] for ds_ in partitions)
-        del partitions                    # not used any longer
-        self._nsplits = len(self._splits)
-
-        self._all_pairs = dict()
-        self._all_pairs_targets = dict()
-        self._splits_idx = []
-
+        self._splits_idx = [sp for sp in splitter.generate(dataset_indicies)]
+ 
+        part_splitter = Splitter(attr=generator.get_space(), attr_values=[1,2])
 
         # precompute all the intra-chunk pairs difference used in the cross-validation
         if __debug__:
             debug('SLC',
                   'Phase 2. Precompute all samples paired differences per split')
 
-        for splits2 in self._splits:
-            self._splits_idx.append([])
-            for split in splits2:
-                self._splits_idx[-1].append([])
-                for ii,i in enumerate(split.samples[:,0]):
-                    ti = labels_numeric[i]
-                    for j in split.samples[:ii,0]:
-                        tj = labels_numeric[j]
-                        pair = (i,j)                        
-                        self._splits_idx[-1][-1].append(pair)
-                        if pair in self._all_pairs:
-                            continue
-                        # order the targets to always fill the lower triangle of the dissimilarity matrix
-                        if ti<tj:
-                            pair_targ = (tj,ti)
-                            dif = dataset.samples[j] - dataset.samples[i]
-                        else:
-                            pair_targ = (ti,tj)
-                            dif = dataset.samples[i] - dataset.samples[j]
-                        self._all_pairs[pair] = dif
-                        self._all_pairs_targets[pair] = pair_targ
-        self._all_pairs_idx = self._all_pairs.keys()
-        self._all_pairs = np.asarray([self._all_pairs[k] for k in self._all_pairs_idx])
-        self._all_pairs_targets = np.asarray([self._all_pairs_targets[k] for k in self._all_pairs_idx])
+        all_pairs = []
+        self._all_pair_targets = []
+        all_pair_splits = []
+        for split in self._splits_idx:
+            split_attr_value = split.sa[generator.attr].value[0]
+            for ii,i in enumerate(split.samples[:,0]):
+                ti = labels_numeric[i]
+                for j in split.samples[:ii,0]:
+                    tj = labels_numeric[j]
+                    pair = (i,j)
+                    #if pair in all_pairs:
+                    #    continue
+                    if ti<tj:
+                        pair_targ = (tj,ti)
+                        dif = dataset.samples[j] - dataset.samples[i]
+                    else:
+                        pair_targ = (ti,tj)
+                        dif = dataset.samples[i] - dataset.samples[j]
+                    all_pairs.append(dif)
+                    all_pair_splits.append(split_attr_value)
+                    self._all_pair_targets.append(pair_targ)
+        self._all_pairs = np.asarray(all_pairs)
+        self._all_pair_splits = np.asarray(all_pair_splits)
+        del all_pairs
 
+        dataset_pair_indicies = Dataset(np.arange(len(self._all_pairs)),
+                                        sa={'targets':self._all_pair_targets, 
+                                            generator.attr:all_pair_splits})
+        partitions = list(generator.generate(dataset_pair_indicies)) \
+            if generator \
+            else [dataset_pair_indicies]
+        self._nparts = len(partitions)
+        self._part_splits = list(tuple([sp.samples.ravel() for sp in part_splitter.generate(ds_)])[:2] for ds_ in partitions)
+        
+        self._upair_targets = sorted(list(set(self._all_pair_targets)))
+        self._pair_targets2num = dict([(upt,upti) for upti,upt in enumerate(self._upair_targets)])
+        self._pair_targets_numeric = np.asarray([self._pair_targets2num[pt] for pt in self._all_pair_targets])
+
+        if __debug__:
+            debug('SLC',
+                  'Phase 3. Compute all searchlights')
 
         if nproc is not None and nproc > 1:
             # split all target ROIs centers into `nproc` equally sized blocks
@@ -754,7 +743,7 @@ class CrossNobisSearchlight(Searchlight):
                 compute(block, dataset, seed=seed)
         else:
             # otherwise collect the results in an 1-item list
-            p_results = [self._proc_block(roi_ids, dataset  )]
+            p_results = [self._proc_block(roi_ids, dataset)]
 
         # Finally collect and possibly process results
         # p_results here is either a generator from pprocess.Map or a list.
@@ -764,7 +753,7 @@ class CrossNobisSearchlight(Searchlight):
         result_ds = hstack([pr for pr in p_results])
         return result_ds
 
-    def _proc_block(self, block, ds, seed=None) :
+    def _proc_block(self, block, ds, seed=None):
         """Little helper to capture the parts of the computation that can be
         parallelized
 
@@ -787,18 +776,11 @@ class CrossNobisSearchlight(Searchlight):
                   "Starting computing block for %i elements" % len(block))
             start_time = time.time()
 
-        ulabels = self._ulabels_numeric
-        nlabels = len(ulabels)
-        n_pair_targets = nlabels*(nlabels-1)/2+nlabels
+        n_pair_targets = len(self._upair_targets)
 
-        res = np.zeros(n_pair_targets)
-        counts = np.zeros_like(res, dtype=np.uint)
-
-        target_pairs = [(ul1,ul2) for uli, ul1 in enumerate(self._ulabels) for ul2 in self._ulabels[:uli+1]]
-
-        results = Dataset(np.empty((n_pair_targets*self._nsplits, len(block)),
+        results = Dataset(np.empty((n_pair_targets*self._nparts, len(block)),
                                    dtype=ds.samples.dtype),
-                          sa=dict(targets=target_pairs*self._nsplits),
+                          sa=dict(targets=self._upair_targets*self._nparts),
                           fa=ds[:,block].fa.copy())
         store_roi_feature_ids = self.ca.is_enabled('roi_feature_ids')
         if store_roi_feature_ids:
@@ -810,6 +792,7 @@ class CrossNobisSearchlight(Searchlight):
         if store_roi_center_ids:
             results.fa['roi_center_ids'] = block
 
+        generator = self._generator
 
         # put rois around all features in the dataset and compute the
         # measure within them
@@ -820,6 +803,8 @@ class CrossNobisSearchlight(Searchlight):
             if store_roi_shrinkages:
                 results.fa['roi_shrinkages'] = np.zeros((results.nfeatures,self._nsplits), dtype=np.float)
             cov_mask = np.empty(self._sl_ext_conn.shape[1], dtype=np.bool)
+
+        pair_split_attr = self._all_pair_splits
 
         for i, f in enumerate(block):
             # retrieve the feature ids of all features in the ROI from the query
@@ -848,6 +833,8 @@ class CrossNobisSearchlight(Searchlight):
             if n_fids<1:
                 results.samples[:,i] = 0
                 continue
+            
+            tmp_pairs = self._all_pairs[:, roi_fids]
 
             if self._splits_cov is not None:
                 cov_mask.fill(False)
@@ -856,24 +843,21 @@ class CrossNobisSearchlight(Searchlight):
                 lr_rows = np.searchsorted(self._sl_ext_conn[0],[roi_fids,roi_fids+1],'left')
                 for l,r in zip(*lr_rows):
                     col_idx = self._sl_ext_conn[1,l:r]
-                    for fid in roi_fids:
-                        cov_mask[l:r] |= (col_idx == fid)
+                    #for fid in roi_fids:
+                    #    cov_mask[l:r] |= (col_idx == fid)
+                    cov_mask[l:r] = np.any(col_idx[:,np.newaxis] == roi_fids[np.newaxis],1)
                 cov_mask_idx = np.argwhere(cov_mask).flatten()
                 triu_idx = np.triu_indices(n_fids)
                 cov = np.empty((n_fids, n_fids), dtype=ds.samples.dtype)
                 cov2 = np.empty((n_fids, n_fids), dtype=ds.samples.dtype)
                 cov_shrink = np.empty((n_fids, n_fids), dtype=ds.samples.dtype)
-                inv_cov = np.empty((n_fids, n_fids), dtype=ds.samples.dtype)
                 delta_ = np.empty((n_fids, n_fids), dtype=ds.samples.dtype)
 
-            tmp_pairs = self._all_pairs[:, roi_fids]
-
-            for spi, split2_idx in enumerate(self._splits_idx):
-                res.fill(0)
-                counts.fill(0)
-                if self._splits_cov is not None:
-                    cov[triu_idx] = self._splits_cov[spi][cov_mask_idx]
-                    cov2[triu_idx] = self._splits_cov2[spi][cov_mask_idx]
+                
+                for split_idx in self._splits_idx:
+                    split_value = split_idx.sa[generator.attr].value[0]
+                    cov[triu_idx] = self._splits_cov[split_value][cov_mask_idx]
+                    cov2[triu_idx] = self._splits_cov2[split_value][cov_mask_idx]
                     cov[triu_idx[::-1]] = cov[triu_idx]
                     cov2[triu_idx[::-1]] = cov2[triu_idx]
                     # ledoit wolf shrinkage
@@ -881,40 +865,33 @@ class CrossNobisSearchlight(Searchlight):
                     delta_[:] = cov.copy()
                     delta_.flat[::n_fids+1] -= mu
                     delta = (delta_ ** 2).sum() / n_fids
-                    beta_ = 1. / (n_fids * self._splits_cov_nsamples[spi]) * np.sum(cov2 - cov ** 2)
+                    beta_ = 1. / (n_fids * self._splits_cov_nsamples[split_value]) * np.sum(cov2 - cov ** 2)
                     beta = min(beta_, delta)
-                    shrinkage = beta / delta
+                    shrinkage = 0 if beta == 0 else beta / delta
                     if store_roi_shrinkages:
-                        results.fa.roi_shrinkages[i,spi] = shrinkage
-                    
+                        # TODO fix split_value
+                        results.fa.roi_shrinkages[i,split_value] = shrinkage
+                        
                     cov_shrink[:] = cov*(1-shrinkage)
                     cov_shrink.flat[::n_fids+1] += mu*shrinkage
-                    inv_cov[:] = np.linalg.inv(cov_shrink)
 
-                test_idxs = np.asarray([self._all_pairs_idx.index(test_idx) for test_idx in split2_idx[1]])
-                for pair_train in split2_idx[0]:
-                    train_idx = self._all_pairs_idx.index(pair_train)
-                    target_train = self._all_pairs_targets[train_idx]
-                    vec_train = tmp_pairs[train_idx]
-                    #vec_train = self._all_pairs[pair_train][roi_fids]
-                    t1,t2 = target_train
-                    res_idx = (t1*(t1-1)/2+t1) + t2
-
-                    self._all_pairs_targets==target_train
+                    cov_eigval, cov_eigvec = np.linalg.eig(cov_shrink)
+                    cov_powminushalf = cov_eigvec.dot((cov_eigvec/np.sqrt(cov_eigval)).T)
                     
-                    pair_test_idxs = test_idxs[np.all(self._all_pairs_targets[test_idxs]==target_train,1)]
-                    all_test_vecs = tmp_pairs[pair_test_idxs]
-                    if self._splits_cov is not None:
-                        res[res_idx] += vec_train.dot(inv_cov).dot(all_test_vecs.T).sum()/n_fids
-                    else:
-                        res[res_idx] += vec_train.dot(all_test_vecs).sum()/n_fids
-                    counts[res_idx] += len(all_test_vecs)
-                    
-                results.samples[spi*n_pair_targets:(spi+1)*n_pair_targets,i] = res/counts
+                    split_pairs_mask = pair_split_attr==split_value
+                    # multivariate normalization
+                    tmp_pairs[split_pairs_mask] = tmp_pairs[split_pairs_mask].dot(cov_powminushalf)
+               
+            for part_idx in range(self._nparts):
+                train_idx, test_idx = self._part_splits[part_idx]
+                for pt_num in range(n_pair_targets):
+                    train_pairs_pt = train_idx[self._pair_targets_numeric[train_idx]==pt_num]
+                    test_pairs_pt = test_idx[self._pair_targets_numeric[test_idx]==pt_num]
+                    corr = tmp_pairs[train_pairs_pt].dot(tmp_pairs[test_pairs_pt].T)/n_fids
+                    results.samples[part_idx*n_pair_targets+pt_num,i] = corr.mean()
 
-                
             if self._splits_cov is not None:
-                del cov, cov2, delta_, cov_shrink, inv_cov, cov_mask_idx
+                del cov, cov2, delta_, cov_shrink, cov_mask_idx, cov_powminushalf
             del roi_fids
             
             if __debug__:
